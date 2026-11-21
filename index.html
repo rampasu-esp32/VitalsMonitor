@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vitals Monitor</title>
+<style>
+  :root {
+    --bg: #0b0f14; --card: #131a22; --line: #1f2a36; --txt: #e8eef5; --dim: #7d8ea3;
+    --heart: #ff3b57; --lung: #29c5ff; --ok: #2ee59d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--txt);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom)); max-width: 900px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .status { font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  button { background: var(--lung); color: #00131c; border: 0; border-radius: 10px;
+    padding: 10px 18px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  button.secondary { background: var(--line); color: var(--txt); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
+  .label { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .anim { width: 120px; height: 120px; flex: none; }
+  .value { font-size: 64px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .unit { font-size: 14px; color: var(--dim); margin-left: 4px; font-weight: 500; }
+  .heart .value { color: var(--heart); }
+  .lung .value { color: var(--lung); }
+  canvas { width: 100%; height: 90px; display: block; margin-top: 10px; background: #0d131a; border-radius: 10px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 10px;
+    border-radius: 999px; background: var(--line); color: var(--dim); }
+  .badge.on { background: rgba(46,229,157,.15); color: var(--ok); }
+  .msg { margin-top: 12px; font-size: 13px; color: #ffb454; display: none; }
+  .foot { margin-top: 14px; display: flex; justify-content: space-between; align-items: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vitals Monitor</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusTxt">Disconnected</span></div>
+</header>
+
+<div class="grid">
+  <section class="card heart">
+    <div class="label">Heart rate</div>
+    <div class="row">
+      <div><span class="value" id="hr">--</span><span class="unit">bpm</span></div>
+      <svg class="anim" viewBox="0 0 100 100" aria-hidden="true">
+        <path id="heartShape" fill="#ff3b57"
+          d="M50 88 C20 65 8 45 8 30 C8 17 18 8 30 8 C39 8 46 13 50 20 C54 13 61 8 70 8 C82 8 92 17 92 30 C92 45 80 65 50 88Z"
+          style="transform-origin:50px 48px"/>
+      </svg>
+    </div>
+    <canvas id="heartCv"></canvas>
+  </section>
+
+  <section class="card lung">
+    <div class="label">Respiration</div>
+    <div class="row">
+      <div><span class="value" id="rr">--</span><span class="unit">br/min</span></div>
+      <svg class="anim" viewBox="0 0 100 100" aria-hidden="true">
+        <g id="lungs" style="transform-origin:50px 58px">
+          <rect x="47" y="8" width="6" height="30" rx="3" fill="#7d8ea3"/>
+          <path d="M50 36 L34 52 M50 36 L66 52" stroke="#7d8ea3" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <ellipse cx="32" cy="62" rx="22" ry="30" fill="#29c5ff" fill-opacity=".85"/>
+          <ellipse cx="68" cy="62" rx="22" ry="30" fill="#29c5ff" fill-opacity=".85"/>
+        </g>
+      </svg>
+    </div>
+    <canvas id="respCv"></canvas>
+  </section>
+</div>
+
+<div class="foot">
+  <span class="badge" id="presence">No presence</span>
+  <button id="btn">Connect</button>
+</div>
+<div class="msg" id="msg"></div>
+
+<script>
+const SVC = 'a1b2c3d4-0001-4a5b-9c0d-1e2f3a4b5c6d';
+const VIT = 'a1b2c3d4-0002-4a5b-9c0d-1e2f3a4b5c6d';
+const WAV = 'a1b2c3d4-0003-4a5b-9c0d-1e2f3a4b5c6d';
+const N = 200;                                   // samples shown per waveform
+
+const $ = id => document.getElementById(id);
+const heartBuf = new Array(N).fill(128);
+const respBuf  = new Array(N).fill(128);
+let hr = 0, rr = 0, lastVitals = 0, device = null, wantConnected = false;
+
+function setStatus(on, text) {
+  $('dot').classList.toggle('on', on);
+  $('statusTxt').textContent = text;
+  $('btn').textContent = on ? 'Disconnect' : 'Connect';
+  $('btn').className = on ? 'secondary' : '';
+}
+function showMsg(t) { const m = $('msg'); m.textContent = t; m.style.display = t ? 'block' : 'none'; }
+
+function push(buf, v) { buf.push(v); if (buf.length > N) buf.shift(); }
+
+function onVitals(dv) {
+  hr = dv.getUint8(0);
+  rr = dv.getUint8(1);
+  const p = dv.getUint8(2) === 1;
+  lastVitals = performance.now();
+  $('hr').textContent = hr ? hr : '--';
+  $('rr').textContent = rr ? rr : '--';
+  $('presence').textContent = p ? 'Person detected' : 'No presence';
+  $('presence').classList.toggle('on', p);
+}
+function onWave(dv) {
+  const type = dv.getUint8(0);
+  for (let i = 1; i <= 5 && i < dv.byteLength; i++) {
+    push(type === 1 ? heartBuf : respBuf, dv.getUint8(i));
+  }
+}
+
+async function connect() {
+  showMsg('');
+  if (!navigator.bluetooth) {
+    showMsg('Web Bluetooth is not supported in this browser. On Android use Chrome; on iPhone use the Bluefy browser.');
+    return;
+  }
+  try {
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ namePrefix: 'R60ABD1' }],
+        optionalServices: [SVC]
+      });
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+    }
+    wantConnected = true;
+    setStatus(false, 'Connecting…');
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    const vit = await svc.getCharacteristic(VIT);
+    const wav = await svc.getCharacteristic(WAV);
+    vit.addEventListener('characteristicvaluechanged', e => onVitals(e.target.value));
+    wav.addEventListener('characteristicvaluechanged', e => onWave(e.target.value));
+    await vit.startNotifications();
+    await wav.startNotifications();
+    setStatus(true, 'Connected · ' + device.name);
+  } catch (err) {
+    setStatus(false, 'Disconnected');
+    if (err.name !== 'NotFoundError') showMsg('Connection failed: ' + err.message);
+    if (!wantConnected) device = null;
+  }
+}
+
+function onDisconnected() {
+  setStatus(false, wantConnected ? 'Reconnecting…' : 'Disconnected');
+  if (wantConnected) setTimeout(connect, 1500);   // auto-reconnect
+}
+
+$('btn').addEventListener('click', () => {
+  if (device && device.gatt.connected) {
+    wantConnected = false;
+    device.gatt.disconnect();
+    device = null;
+    setStatus(false, 'Disconnected');
+  } else {
+    connect();
+  }
+});
+
+// ---------- waveform canvas ----------
+function drawWave(cv, buf, color) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = '#1f2a36'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+  let mn = Math.min(...buf), mx = Math.max(...buf);
+  if (mx - mn < 8) { mn = 124; mx = 132; }
+  g.strokeStyle = color; g.lineWidth = 2; g.lineJoin = 'round';
+  g.beginPath();
+  buf.forEach((v, i) => {
+    const x = i * w / (N - 1);
+    const y = h - 6 - (v - mn) * (h - 12) / (mx - mn);
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  });
+  g.stroke();
+}
+
+// ---------- animation loop ----------
+let lung = 0.5;
+function frame(t) {
+  const fresh = performance.now() - lastVitals < 6000;
+  if (!fresh && lastVitals) { $('hr').textContent = '--'; $('rr').textContent = '--'; }
+
+  // heart: lub-dub pulse timed to BPM
+  let s = 1;
+  if (fresh && hr > 0) {
+    const period = 60000 / hr;
+    const ph = (t % period) / period;
+    const p1 = Math.exp(-ph * 14);
+    const p2 = ph > 0.28 ? 0.6 * Math.exp(-(ph - 0.28) * 16) : 0;
+    s = 1 + 0.22 * Math.max(p1, p2);
+  }
+  $('heartShape').style.transform = `scale(${s})`;
+
+  // lungs: follow the respiration waveform, else a sine at the breathing rate
+  let target = 0.4;
+  const tail = respBuf.slice(-40);
+  const mn = Math.min(...tail), mx = Math.max(...tail);
+  if (fresh && mx - mn >= 6) target = (respBuf[N - 1] - mn) / (mx - mn);
+  else if (fresh && rr > 0) target = 0.5 + 0.5 * Math.sin(2 * Math.PI * t / (60000 / rr));
+  lung += (target - lung) * 0.2;
+  $('lungs').style.transform = `scale(${0.85 + 0.25 * lung}, ${0.9 + 0.2 * lung})`;
+
+  drawWave($('heartCv'), heartBuf, '#ff3b57');
+  drawWave($('respCv'), respBuf, '#29c5ff');
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
